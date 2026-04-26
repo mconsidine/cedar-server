@@ -1327,6 +1327,7 @@ impl Cedar for MyCedar {
         }
         if req.shutdown_server.unwrap_or(false) {
             info!("Shutting down host system");
+            prepare_for_exit(&self.state.lock().await.imu_tracker.clone());
             let activity_led = self.state.lock().await.activity_led.clone();
             activity_led.lock().await.stop().await;
             let output = Command::new("sudo")
@@ -1344,6 +1345,7 @@ impl Cedar for MyCedar {
         }
         if req.restart_server.unwrap_or(false) {
             info!("Restarting host system");
+            prepare_for_exit(&self.state.lock().await.imu_tracker.clone());
             let activity_led = self.state.lock().await.activity_led.clone();
             activity_led.lock().await.stop().await;
             let output = Command::new("sudo")
@@ -3743,18 +3745,23 @@ pub fn server_main(
     let remaining = pargs.finish();
 
     let got_signal = Arc::new(AtomicBool::new(false));
+
+    let (cedar_sky, wifi, imu_tracker, solver) =
+        get_dependencies(Arguments::from_vec(remaining));
+
+    // Handle both SIGINT and SIGTERM (the latter is sent by systemd on
+    // `systemctl restart`, e.g. when the updater installs a new version).
     let got_signal2 = got_signal.clone();
+    let imu_for_signal = imu_tracker.clone();
     ctrlc::set_handler(move || {
-        info!("Got control-c");
+        info!("Got shutdown signal, saving IMU state");
+        prepare_for_exit(&imu_for_signal);
         got_signal2.store(true, AtomicOrdering::Relaxed);
         std::thread::sleep(Duration::from_secs(1));
         info!("Exiting");
         std::process::exit(-1);
     })
     .unwrap();
-
-    let (cedar_sky, wifi, imu_tracker, solver) =
-        get_dependencies(Arguments::from_vec(remaining));
 
     // Derive product name from device verification status (indicated by whether
     // cedar_sky is Some).
@@ -3783,6 +3790,17 @@ pub fn server_main(
         imu_tracker,
         solver,
     );
+}
+
+/// Perform cleanup actions before process exit (signal, shutdown, or restart).
+fn prepare_for_exit(
+    imu_tracker: &Option<Arc<tokio::sync::Mutex<dyn ImuTrait + Send>>>,
+) {
+    if let Some(imu) = imu_tracker {
+        if let Err(e) = imu.blocking_lock().save_state() {
+            warn!("Failed to save IMU state: {:?}", e);
+        }
+    }
 }
 
 async fn get_attached_camera(

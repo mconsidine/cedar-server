@@ -19,7 +19,7 @@ cedar_detect = { version = "0.8.0", path = "../../cedar-detect" }
 cedar-elements = { path = "../elements" }
 chrono = "0.4.31"
 clap = "4.5.23"
-ctrlc = "3.4.2"
+ctrlc = { version = "3.4.2", features = ["termination"] }
 env_logger = "0.11.5"
 futures = "0.3.30"
 glob = "0.3.1"

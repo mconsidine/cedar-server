@@ -160,4 +160,7 @@ pub trait ImuTrait {
 
     // Returns the IMU's model.
     fn get_model(&self) -> String;
+
+    // Saves the IMU's calibrated state. This call blocks on IO.
+    fn save_state(&self) -> Result<(), CanonicalError>;
 }
