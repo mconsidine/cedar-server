@@ -49,6 +49,7 @@ use cedar_elements::{
         QueryCatalogRequest, QueryCatalogResponse,
     },
     cedar_sky_trait::{CedarSkyTrait, LocationInfo},
+    hot_pixel_trait::HotPixelTrait,
     imu_trait::ImuTrait,
     solver_trait::SolverTrait,
     wifi_trait::WifiTrait,
@@ -259,6 +260,9 @@ struct CedarState {
 
     // Not all builds of Cedar-server support IMU fusion.
     imu_tracker: Option<Arc<tokio::sync::Mutex<dyn ImuTrait + Send>>>,
+
+    // Not all builds of Cedar-server support hot pixel mapping.
+    hot_pixel_map: Option<Arc<tokio::sync::Mutex<dyn HotPixelTrait + Send>>>,
 
     // We host the user interface preferences and some operation settings here.
     // On startup we apply some of these to `operation_settings`; we reflect
@@ -1327,7 +1331,8 @@ impl Cedar for MyCedar {
         }
         if req.shutdown_server.unwrap_or(false) {
             info!("Shutting down host system");
-            prepare_for_exit(&self.state.lock().await.imu_tracker.clone());
+            prepare_for_exit(&self.state.lock().await.imu_tracker.clone(),
+                             &self.state.lock().await.hot_pixel_map.clone());
             let activity_led = self.state.lock().await.activity_led.clone();
             activity_led.lock().await.stop().await;
             let output = Command::new("sudo")
@@ -1345,7 +1350,8 @@ impl Cedar for MyCedar {
         }
         if req.restart_server.unwrap_or(false) {
             info!("Restarting host system");
-            prepare_for_exit(&self.state.lock().await.imu_tracker.clone());
+            prepare_for_exit(&self.state.lock().await.imu_tracker.clone(),
+                             &self.state.lock().await.hot_pixel_map.clone());
             let activity_led = self.state.lock().await.activity_led.clone();
             activity_led.lock().await.stop().await;
             let output = Command::new("sudo")
@@ -2823,6 +2829,7 @@ impl MyCedar {
         cedar_sky: Option<Arc<tokio::sync::Mutex<dyn CedarSkyTrait + Send>>>,
         wifi: Option<Arc<tokio::sync::Mutex<dyn WifiTrait + Send>>>,
         imu_tracker: Option<Arc<tokio::sync::Mutex<dyn ImuTrait + Send>>>,
+        hot_pixel_map: Option<Arc<tokio::sync::Mutex<dyn HotPixelTrait + Send>>>,
     ) -> Result<Self, CanonicalError> {
         let cedar_version = env!("CARGO_PKG_VERSION");
         let processor_model =
@@ -3166,6 +3173,7 @@ impl MyCedar {
             },
             calibration_data: shared_calibration_data.clone(),
             imu_tracker: imu_tracker.clone(),
+            hot_pixel_map: hot_pixel_map.clone(),
             polar_analyzer: closure_polar_analyzer.clone(),
             normalize_rows,
             is_color: camera.lock().await.is_color(),
@@ -3213,6 +3221,7 @@ impl MyCedar {
                 cedar_sky,
                 wifi,
                 imu_tracker,
+                hot_pixel_map,
                 preferences: shared_preferences.clone(),
                 scaled_image: None,
                 scaled_image_binning_factor: 1,
@@ -3631,9 +3640,9 @@ fn parse_duration(
 }
 
 // `get_dependencies` Is called to obtain the CedarSkyTrait, WifiTrait,
-//     ImuTrait, and SolverTrait implementations, if any. This function is
-//     called after logging has been set up and `server_main()`s command line
-//     arguments have been consumed.
+//     ImuTrait, HotPixelTrait, and SolverTrait implementations, if any. This
+//     function is called after logging has been set up and `server_main()`s
+//     command line arguments have been consumed.
 //     The AtomicBool is set to true if control-c occurs.
 pub fn server_main(
     copyright: &str,
@@ -3644,6 +3653,7 @@ pub fn server_main(
         Option<Arc<tokio::sync::Mutex<dyn CedarSkyTrait + Send>>>,
         Option<Arc<tokio::sync::Mutex<dyn WifiTrait + Send>>>,
         Option<Arc<tokio::sync::Mutex<dyn ImuTrait + Send>>>,
+        Option<Arc<tokio::sync::Mutex<dyn HotPixelTrait + Send>>>,
         Option<Arc<tokio::sync::Mutex<dyn SolverTrait + Send + Sync>>>,
     ),
 ) {
@@ -3746,16 +3756,17 @@ pub fn server_main(
 
     let got_signal = Arc::new(AtomicBool::new(false));
 
-    let (cedar_sky, wifi, imu_tracker, solver) =
+    let (cedar_sky, wifi, imu_tracker, hot_pixel_map, solver) =
         get_dependencies(Arguments::from_vec(remaining));
 
     // Handle both SIGINT and SIGTERM (the latter is sent by systemd on
     // `systemctl restart`, e.g. when the updater installs a new version).
     let got_signal2 = got_signal.clone();
     let imu_for_signal = imu_tracker.clone();
+    let hpm_for_signal = hot_pixel_map.clone();
     ctrlc::set_handler(move || {
-        info!("Got shutdown signal, saving IMU state");
-        prepare_for_exit(&imu_for_signal);
+        info!("Got shutdown signal, saving state");
+        prepare_for_exit(&imu_for_signal, &hpm_for_signal);
         got_signal2.store(true, AtomicOrdering::Relaxed);
         std::thread::sleep(Duration::from_secs(1));
         info!("Exiting");
@@ -3788,6 +3799,7 @@ pub fn server_main(
         cedar_sky,
         wifi,
         imu_tracker,
+        hot_pixel_map,
         solver,
     );
 }
@@ -3795,10 +3807,16 @@ pub fn server_main(
 /// Perform cleanup actions before process exit (signal, shutdown, or restart).
 fn prepare_for_exit(
     imu_tracker: &Option<Arc<tokio::sync::Mutex<dyn ImuTrait + Send>>>,
+    hot_pixel_map: &Option<Arc<tokio::sync::Mutex<dyn HotPixelTrait + Send>>>,
 ) {
     if let Some(imu) = imu_tracker {
         if let Err(e) = imu.blocking_lock().save_state() {
             warn!("Failed to save IMU state: {:?}", e);
+        }
+    }
+    if let Some(hpm) = hot_pixel_map {
+        if let Err(e) = hpm.blocking_lock().save_state() {
+            warn!("Failed to save hot pixel map state: {:?}", e);
         }
     }
 }
@@ -4001,6 +4019,7 @@ async fn async_main(
     cedar_sky: Option<Arc<tokio::sync::Mutex<dyn CedarSkyTrait + Send>>>,
     wifi: Option<Arc<tokio::sync::Mutex<dyn WifiTrait + Send>>>,
     imu_tracker: Option<Arc<tokio::sync::Mutex<dyn ImuTrait + Send>>>,
+    hot_pixel_map: Option<Arc<tokio::sync::Mutex<dyn HotPixelTrait + Send>>>,
     injected_solver: Option<
         Arc<tokio::sync::Mutex<dyn SolverTrait + Send + Sync>>,
     >,
@@ -4171,6 +4190,7 @@ async fn async_main(
         cedar_sky,
         wifi,
         imu_tracker,
+        hot_pixel_map,
     )
     .await
     .unwrap();

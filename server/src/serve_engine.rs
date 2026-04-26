@@ -20,6 +20,7 @@ use cedar_elements::{
         StarCentroid,
     },
     image_utils::{scale_image, ImageRotator},
+    hot_pixel_trait::HotPixelTrait,
     imu_trait::ImuTrait,
     value_stats::ValueStatsAccumulator,
 };
@@ -39,6 +40,7 @@ pub struct ServeContext {
     pub operation_settings: OperationSettings,
     pub calibration_data: Arc<tokio::sync::Mutex<CalibrationData>>,
     pub imu_tracker: Option<Arc<tokio::sync::Mutex<dyn ImuTrait + Send>>>,
+    pub hot_pixel_map: Option<Arc<tokio::sync::Mutex<dyn HotPixelTrait + Send>>>,
     pub polar_analyzer: Arc<tokio::sync::Mutex<PolarAnalyzer>>,
     pub normalize_rows: bool,
     pub is_color: bool,
